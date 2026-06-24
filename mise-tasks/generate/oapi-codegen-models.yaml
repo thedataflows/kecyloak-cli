@@ -1,0 +1,15 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/oapi-codegen/oapi-codegen/HEAD/configuration-schema.json
+package: models
+generate:
+  models: true
+  client: false
+  echo-server: false
+  chi-server: false
+  gin-server: false
+  gorilla-server: false
+  strict-server: false
+  fiber-server: false
+output-options:
+  response-type-suffix: Resp
+  skip-fmt: false
+  skip-prune: false
