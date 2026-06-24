@@ -2,7 +2,6 @@ package admin
 
 import (
 	"context"
-	"fmt"
 	"strings"
 
 	"github.com/thedataflows/keycloak-cli/pkg/manifest"
@@ -12,7 +11,7 @@ import (
 // and fetches any referenced resources that are not already present in the
 // result set. This makes manifests self-contained when importing into a
 // different Keycloak server.
-func (s *service) resolveReferences(ctx context.Context, realmNames []string, resources []manifest.Resource) ([]manifest.Resource, []string) {
+func (s *service) resolveReferences(ctx context.Context, realmNames []string, resources []manifest.Resource) ([]manifest.Resource, []FetchFailure) {
 	if len(resources) == 0 || len(realmNames) == 0 {
 		return nil, nil
 	}
@@ -28,13 +27,13 @@ func (s *service) resolveReferences(ctx context.Context, realmNames []string, re
 	}
 
 	var results []manifest.Resource
-	var failures []string
+	var failures []FetchFailure
 
 	for _, realm := range realmNames {
 		for resourceType, ids := range idsByType {
 			fetched, err := s.fetchResourcesByIDs(ctx, resourceType, realm, ids)
 			if err != nil {
-				failures = append(failures, fmt.Sprintf("references:%s:%s: %v", resourceType, realm, err))
+				failures = append(failures, fetchFailure(resourceType, realm, err))
 				continue
 			}
 			for i := range fetched {

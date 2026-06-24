@@ -11,21 +11,21 @@ import (
 // fetchRelationships retrieves relationship state for the supplied realms. When
 // parentTypes is non-empty, only relationship kinds whose ResourceA is in the
 // set are fetched. A nil or empty parentTypes map fetches all known kinds.
-func (s *service) fetchRelationships(ctx context.Context, realms []string, parentTypes map[string]struct{}) ([]manifest.RelationshipOperation, []string) {
+func (s *service) fetchRelationships(ctx context.Context, realms []string, parentTypes map[string]struct{}) ([]manifest.RelationshipOperation, []FetchFailure) {
 	var results []manifest.RelationshipOperation
-	var failures []string
+	var failures []FetchFailure
 
 	for _, realm := range realms {
 		realmRelationships, err := s.fetchRelationshipsForRealm(ctx, realm, parentTypes)
 		if err != nil {
-			failures = append(failures, "relationships:"+realm+": "+err.Error())
+			failures = append(failures, FetchFailure{Resource: "relationships", Detail: realm, Err: err})
 			continue
 		}
 		results = append(results, realmRelationships...)
 	}
 
 	if err := catalog.ValidateRelationshipOperations(s.Spec(), results); err != nil {
-		failures = append(failures, "relationships: "+err.Error())
+		failures = append(failures, FetchFailure{Resource: "relationships", Detail: "validation", Err: err})
 	}
 
 	return results, failures
@@ -77,21 +77,21 @@ func (s *service) fetchRelationshipsForRealm(ctx context.Context, realm string, 
 // fetchRelationshipsForResources fetches relationship kinds whose ResourceA is in
 // parentTypes, but only for the supplied resources. Parent indexes are built from
 // those resources instead of re-fetching whole collections from the server.
-func (s *service) fetchRelationshipsForResources(ctx context.Context, realms []string, parentTypes map[string]struct{}, resources []manifest.Resource) ([]manifest.RelationshipOperation, []string) {
+func (s *service) fetchRelationshipsForResources(ctx context.Context, realms []string, parentTypes map[string]struct{}, resources []manifest.Resource) ([]manifest.RelationshipOperation, []FetchFailure) {
 	var results []manifest.RelationshipOperation
-	var failures []string
+	var failures []FetchFailure
 
 	for _, realm := range realms {
 		realmRelationships, err := s.fetchRelationshipsForRealmFromResources(ctx, realm, parentTypes, resources)
 		if err != nil {
-			failures = append(failures, "relationships:"+realm+": "+err.Error())
+			failures = append(failures, FetchFailure{Resource: "relationships", Detail: realm, Err: err})
 			continue
 		}
 		results = append(results, realmRelationships...)
 	}
 
 	if err := catalog.ValidateRelationshipOperations(s.Spec(), results); err != nil {
-		failures = append(failures, "relationships: "+err.Error())
+		failures = append(failures, FetchFailure{Resource: "relationships", Detail: "validation", Err: err})
 	}
 
 	return results, failures

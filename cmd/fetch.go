@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/alecthomas/kong"
@@ -60,7 +61,30 @@ func (c *FetchCmd) Run(ctx *kong.Context, cli *CLI) error {
 	}
 
 	if len(report.Failures) > 0 {
-		log.Logger.Warn().Str("pkg", PKG_CMD).Msgf("Some resources failed: %v", strings.Join(report.Failures, ", "))
+		var realFailures []string
+		notFound := make(map[string]int)
+		for _, f := range report.Failures {
+			if f.NotFound {
+				notFound[f.Resource]++
+				continue
+			}
+			realFailures = append(realFailures, f.String())
+		}
+		if len(realFailures) > 0 {
+			log.Logger.Warn().Str("pkg", PKG_CMD).Msgf("Resources failed: %s", strings.Join(realFailures, ", "))
+		}
+		if len(notFound) > 0 {
+			keys := make([]string, 0, len(notFound))
+			for k := range notFound {
+				keys = append(keys, k)
+			}
+			sort.Strings(keys)
+			parts := make([]string, 0, len(keys))
+			for _, k := range keys {
+				parts = append(parts, fmt.Sprintf("%s (%d)", k, notFound[k]))
+			}
+			log.Logger.Info().Str("pkg", PKG_CMD).Msgf("Optional resources not found: %s", strings.Join(parts, ", "))
+		}
 	}
 	return nil
 }

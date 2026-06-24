@@ -100,7 +100,7 @@ func (s *service) Apply(ctx context.Context, resources []manifest.Resource, rela
 					Resource: "relationship",
 					Action:   "failed",
 					Status:   http.StatusInternalServerError,
-					Error:    failure,
+					Error:    failure.String(),
 				})
 				report.Failed++
 			}

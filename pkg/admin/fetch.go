@@ -27,7 +27,57 @@ type FetchQuery struct {
 type FetchReport struct {
 	Resources     []manifest.Resource
 	Relationships []manifest.RelationshipOperation
-	Failures      []string
+	Failures      []FetchFailure
+}
+
+// FetchFailure describes a single resource that could not be fetched.
+//
+// NotFound is true when the underlying error was an HTTP 404, meaning an
+// optional resource is simply absent rather than genuinely broken — for
+// example authorization resources/scopes on a client that does not have
+// authorization services enabled, or organizations on a realm where the
+// feature is disabled. The command layer aggregates these separately from
+// real failures so the output distinguishes "absent" from "broken".
+//
+// Resource is the resource type (e.g. "scope", "organization") and is used
+// as the aggregation key. Detail carries additional context such as the
+// parent identifier or realm.
+type FetchFailure struct {
+	Resource string
+	Detail   string
+	NotFound bool
+	Err      error
+}
+
+func (f FetchFailure) String() string {
+	s := f.Resource
+	if f.Detail != "" {
+		s += " " + f.Detail
+	}
+	if f.Err != nil {
+		if s != "" {
+			s += ": "
+		}
+		s += f.Err.Error()
+	}
+	return s
+}
+
+func fetchFailure(resource, detail string, err error) FetchFailure {
+	return FetchFailure{
+		Resource: resource,
+		Detail:   detail,
+		NotFound: isNotFound(err),
+		Err:      err,
+	}
+}
+
+func logFetchError(label string, err error) {
+	evt := log.Logger.Error().Str("pkg", "admin").Err(err)
+	if isNotFound(err) {
+		evt = log.Logger.Debug().Str("pkg", "admin").Err(err)
+	}
+	evt.Msgf("fetch %s", label)
 }
 
 func (s *service) Fetch(ctx context.Context, query FetchQuery) (FetchReport, error) {
@@ -44,7 +94,7 @@ func (s *service) Fetch(ctx context.Context, query FetchQuery) (FetchReport, err
 	reqs, includeRelationships := requestedResources(resourceList)
 	includeRelationships = includeRelationships || query.IncludeRelationships || query.Depth > 1
 	var results []manifest.Resource
-	var failures []string
+	var failures []FetchFailure
 	realmNames := realmNamesFromResources(realms)
 	queryParams := buildQueryParams(query)
 
@@ -57,8 +107,8 @@ func (s *service) Fetch(ctx context.Context, query FetchQuery) (FetchReport, err
 		if resource == "realm" {
 			fetched, fetchErr := s.fetchResourceCollection(ctx, resource, nil, query.Realm)
 			if fetchErr != nil {
-				log.Logger.Error().Str("pkg", "admin").Err(fetchErr).Msgf("fetch %s", resource)
-				failures = append(failures, resource)
+				logFetchError(resource, fetchErr)
+				failures = append(failures, fetchFailure(resource, "", fetchErr))
 				continue
 			}
 			results = append(results, fetched...)
@@ -66,7 +116,7 @@ func (s *service) Fetch(ctx context.Context, query FetchQuery) (FetchReport, err
 		}
 
 		if len(realmNames) == 0 {
-			failures = append(failures, resource+" (no realms available)")
+			failures = append(failures, FetchFailure{Resource: resource, Detail: "no realms available"})
 			continue
 		}
 
@@ -74,8 +124,8 @@ func (s *service) Fetch(ctx context.Context, query FetchQuery) (FetchReport, err
 			for _, realm := range realmNames {
 				fetched, fetchErr := s.fetchAuthenticationExecutions(ctx, realm, query.Parent)
 				if fetchErr != nil {
-					log.Logger.Error().Str("pkg", "admin").Err(fetchErr).Msgf("fetch %s for realm %s", resource, realm)
-					failures = append(failures, resource+":"+realm)
+					logFetchError(resource+" for realm "+realm, fetchErr)
+					failures = append(failures, fetchFailure(resource, realm, fetchErr))
 					continue
 				}
 				results = append(results, fetched...)
@@ -86,8 +136,8 @@ func (s *service) Fetch(ctx context.Context, query FetchQuery) (FetchReport, err
 		for _, realm := range realmNames {
 			fetched, fetchErr := s.fetchRealmScopedResources(ctx, resource, realm, queryParams)
 			if fetchErr != nil {
-				log.Logger.Error().Str("pkg", "admin").Err(fetchErr).Msgf("fetch %s for realm %s", resource, realm)
-				failures = append(failures, resource+":"+realm)
+				logFetchError(resource+" for realm "+realm, fetchErr)
+				failures = append(failures, fetchFailure(resource, realm, fetchErr))
 				continue
 			}
 			results = append(results, fetched...)
@@ -103,7 +153,7 @@ func (s *service) Fetch(ctx context.Context, query FetchQuery) (FetchReport, err
 	var childTypes map[string]struct{}
 	if query.Depth > 0 && len(realmNames) > 0 {
 		var depthResources []manifest.Resource
-		var depthFailures []string
+		var depthFailures []FetchFailure
 		depthResources, childTypes, depthFailures = s.fetchDepthLevels(ctx, query.Depth, realmNames, seeds)
 		results = append(results, depthResources...)
 		failures = append(failures, depthFailures...)
@@ -291,10 +341,10 @@ func requestedResources(resourceList string) ([]string, bool) {
 	return resources, includeRelationships
 }
 
-func (s *service) fetchDepthLevels(ctx context.Context, depth int, realmNames []string, seeds []manifest.Resource) ([]manifest.Resource, map[string]struct{}, []string) {
+func (s *service) fetchDepthLevels(ctx context.Context, depth int, realmNames []string, seeds []manifest.Resource) ([]manifest.Resource, map[string]struct{}, []FetchFailure) {
 	downward, err := s.Spec().BuildDownwardGraph()
 	if err != nil {
-		return nil, nil, []string{"depth-graph: " + err.Error()}
+		return nil, nil, []FetchFailure{{Resource: "depth-graph", Err: err}}
 	}
 
 	childParents := make(map[string][]string)
@@ -308,7 +358,7 @@ func (s *service) fetchDepthLevels(ctx context.Context, depth int, realmNames []
 
 	resourcesByTypeRealm := indexResourcesByTypeRealm(seeds)
 	var results []manifest.Resource
-	var failures []string
+	var failures []FetchFailure
 	seen := make(map[string]struct{})
 	for _, r := range seeds {
 		seen[resourceKey(r)] = struct{}{}
@@ -323,7 +373,7 @@ func (s *service) fetchDepthLevels(ctx context.Context, depth int, realmNames []
 			for _, child := range children {
 				fetched, fetchErr := s.fetchNestedResourceCollection(ctx, child.ChildType, child.Path, parent.Type, parent)
 				if fetchErr != nil {
-					failures = append(failures, fmt.Sprintf("%s:%s:%s: %v", child.ChildType, parent.Type, parent.Identifier(), fetchErr))
+					failures = append(failures, fetchFailure(child.ChildType, parent.Type+":"+parent.Identifier(), fetchErr))
 					continue
 				}
 				for i := range fetched {
