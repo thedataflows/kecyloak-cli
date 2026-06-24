@@ -504,3 +504,48 @@ func resourceTypes(resources []manifest.Resource) []string {
 	}
 	return types
 }
+
+func TestFetchExactMatchEmitsExactQueryParam(t *testing.T) {
+	tests := []struct {
+		name       string
+		exactMatch bool
+		wantExact  string
+	}{
+		{name: "exact match on", exactMatch: true, wantExact: "true"},
+		{name: "exact match off", exactMatch: false, wantExact: ""},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var capturedQuery string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/admin/realms":
+					writeJSON(t, w, []map[string]interface{}{{"realm": "demo"}})
+				case r.Method == http.MethodGet && r.URL.Path == "/admin/realms/demo/users":
+					capturedQuery = r.URL.RawQuery
+					writeJSON(t, w, []map[string]interface{}{{"id": "user-1", "username": "alice"}})
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer server.Close()
+
+			service := newServiceForTest(t, server.URL)
+			_, err := service.Fetch(context.Background(), admin.FetchQuery{
+				Resources:  "user",
+				Search:     "alice",
+				ExactMatch: tc.exactMatch,
+			})
+			require.NoError(t, err)
+
+			require.NotEmpty(t, capturedQuery, "expected a request to the user collection")
+			assert.Contains(t, capturedQuery, "search=alice")
+			if tc.wantExact != "" {
+				assert.Contains(t, capturedQuery, "exact="+tc.wantExact)
+			} else {
+				assert.NotContains(t, capturedQuery, "exact=")
+			}
+		})
+	}
+}

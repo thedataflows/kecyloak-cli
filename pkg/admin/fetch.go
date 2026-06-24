@@ -22,6 +22,7 @@ type FetchQuery struct {
 	IncludeRelationships bool
 	Depth                int
 	Filter               string
+	ExactMatch           bool
 }
 
 type FetchReport struct {
@@ -285,10 +286,6 @@ func (s *service) fetchResourceCollection(ctx context.Context, resource string, 
 }
 
 func buildQueryParams(query FetchQuery) []map[string]string {
-	if query.Search == "" && query.Max <= 0 {
-		return nil
-	}
-
 	params := make(map[string]string)
 	if query.Search != "" {
 		params["search"] = query.Search
@@ -296,7 +293,12 @@ func buildQueryParams(query FetchQuery) []map[string]string {
 	if query.Max > 0 {
 		params["max"] = fmt.Sprintf("%d", query.Max)
 	}
-
+	if query.ExactMatch {
+		params["exact"] = "true"
+	}
+	if len(params) == 0 {
+		return nil
+	}
 	return []map[string]string{params}
 }
 

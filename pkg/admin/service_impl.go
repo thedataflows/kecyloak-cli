@@ -17,11 +17,15 @@ type service struct {
 }
 
 func newService(config Config) (Service, error) {
+	var authSvc auth.Service = auth.New()
+	if config.Auth != nil {
+		authSvc = config.Auth
+	}
 	impl, err := internal.NewRuntimeClient(internal.Config{
 		BaseURL:  config.BaseURL,
 		SpecPath: config.SpecPath,
 		Timeout:  config.Timeout,
-	}, auth.New())
+	}, authSvc)
 	if err != nil {
 		return nil, err
 	}

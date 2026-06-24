@@ -5,8 +5,12 @@ package internal
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -49,6 +53,57 @@ func (s *Service) PasswordToken(ctx context.Context, baseURL, realm, username, p
 	}
 
 	return *token, nil
+}
+
+// ClientCredentialsToken exchanges client credentials for an access token via
+// the RFC 6749 client_credentials grant. Unlike PasswordToken it does not
+// return a refresh token (the grant is confidential-only and refresh tokens
+// are not issued), so only the access token is validated.
+func (s *Service) ClientCredentialsToken(ctx context.Context, baseURL, realm, clientID, clientSecret string) (oauth2.Token, error) {
+	config := &oauth2.Config{
+		ClientID:     clientID,
+		ClientSecret: clientSecret,
+		Endpoint:     oauth2.Endpoint{TokenURL: tokenEndpointURL(baseURL, realm)},
+	}
+
+	form := url.Values{
+		"grant_type": {"client_credentials"},
+	}
+	if len(config.Scopes) > 0 {
+		form.Set("scope", strings.Join(config.Scopes, " "))
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, config.Endpoint.TokenURL, strings.NewReader(form.Encode()))
+	if err != nil {
+		return oauth2.Token{}, fmt.Errorf("client credentials token: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.SetBasicAuth(url.QueryEscape(config.ClientID), url.QueryEscape(config.ClientSecret))
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return oauth2.Token{}, fmt.Errorf("client credentials token: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return oauth2.Token{}, fmt.Errorf("client credentials token: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return oauth2.Token{}, fmt.Errorf("client credentials token: %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var token oauth2.Token
+	if err := json.Unmarshal(body, &token); err != nil {
+		return oauth2.Token{}, fmt.Errorf("client credentials token: %w", err)
+	}
+	if token.AccessToken == "" {
+		return oauth2.Token{}, fmt.Errorf("no access token returned")
+	}
+
+	log.Logger.Debug().Str("pkg", pkgAuth).Msgf("Client credentials token response: %+v", token)
+	return token, nil
 }
 
 func (s *Service) SetEnvToken(key, value, envFile string) error {

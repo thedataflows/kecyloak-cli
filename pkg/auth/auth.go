@@ -15,6 +15,7 @@ const (
 // Service is the public API for Keycloak admin token acquisition and refresh.
 type Service interface {
 	PasswordToken(ctx context.Context, baseURL, realm, username, password string) (oauth2.Token, error)
+	ClientCredentialsToken(ctx context.Context, baseURL, realm, clientID, clientSecret string) (oauth2.Token, error)
 	AccessToken(ctx context.Context, baseURL, accessToken, refreshToken string) (string, error)
 	SetEnvToken(key, value, envFile string) error
 }

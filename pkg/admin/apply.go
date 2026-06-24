@@ -31,12 +31,19 @@ type ApplyReport struct {
 }
 
 type ApplyResult struct {
-	Resource string `json:"resource"`
-	Realm    string `json:"realm,omitempty"`
-	Name     string `json:"name"`
-	Action   string `json:"action"`
-	Status   int    `json:"status"`
-	Error    string `json:"error,omitempty"`
+	Resource  string `json:"resource"`
+	Realm     string `json:"realm,omitempty"`
+	Name      string `json:"name"`
+	Action    string `json:"action"`
+	Status    int    `json:"status"`
+	Error     string `json:"error,omitempty"`
+	CreatedID string `json:"createdId,omitempty"`
+
+	// typedErr holds the structured *Error counterpart of Error so callers can
+	// use errors.As on the value returned by Apply. Unexported because the
+	// public surface is Error (string) plus the typed error surfaced through
+	// Apply's return value.
+	typedErr *Error
 }
 
 func (s *service) Apply(ctx context.Context, resources []manifest.Resource, relationships []manifest.RelationshipOperation, options ApplyOptions) (ApplyReport, error) {
@@ -131,6 +138,9 @@ func accumulateApplyResult(report *ApplyReport, result ApplyResult, options Appl
 	}
 	report.Failed++
 	if !options.ContinueOnError {
+		if result.typedErr != nil {
+			return fmt.Errorf("%s: %w", prefix, result.typedErr)
+		}
 		return fmt.Errorf("%s: %s", prefix, result.Error)
 	}
 	return nil
@@ -255,10 +265,13 @@ func (s *service) applyRelationships(ctx context.Context, relationships []manife
 			if status == 0 {
 				status = http.StatusInternalServerError
 			}
-			typedErr := classifyError(err, status, "apply", "relationship")
+			classified := classifyError(err, status, "apply", "relationship")
 			result.Action = "failed"
 			result.Status = status
-			result.Error = typedErr.Error()
+			result.Error = classified.Error()
+			if ae, ok := classified.(*Error); ok {
+				result.typedErr = ae
+			}
 		}
 
 		results = append(results, result)
@@ -582,36 +595,40 @@ func operationExists(resolver *catalog.Resolver, resource manifest.Resource, met
 	return err == nil
 }
 
-func (s *service) newResourceResult(resource manifest.Resource, action string, status int, err error) ApplyResult {
+func (s *service) newResourceResult(resource manifest.Resource, action string, status int, err error, createdID string) ApplyResult {
 	result := ApplyResult{
-		Resource: resource.Type,
-		Realm:    resource.Realm,
-		Name:     s.resourceDisplayName(resource),
-		Action:   action,
-		Status:   status,
+		Resource:  resource.Type,
+		Realm:     resource.Realm,
+		Name:      s.resourceDisplayName(resource),
+		Action:    action,
+		Status:    status,
+		CreatedID: createdID,
 	}
 	if err != nil {
 		result.Error = err.Error()
+		if ae, ok := err.(*Error); ok {
+			result.typedErr = ae
+		}
 	}
 	return result
 }
 
 func (s *service) applyDelete(ctx context.Context, resource manifest.Resource, hasDelete, resourceExists bool, idMap map[string]string) ApplyResult {
 	if !hasDelete {
-		return s.newResourceResult(resource, "not-supported", http.StatusOK, nil)
+		return s.newResourceResult(resource, "not-supported", http.StatusOK, nil, "")
 	}
 	if !resourceExists && stringID(resource.Data, "id") == "" {
-		return s.newResourceResult(resource, "not-found", http.StatusOK, nil)
+		return s.newResourceResult(resource, "not-found", http.StatusOK, nil, "")
 	}
 
 	status, err := s.specClient.DeleteResource(ctx, resource)
 	if err == nil {
-		return s.newResourceResult(resource, "deleted", status, nil)
+		return s.newResourceResult(resource, "deleted", status, nil, "")
 	}
 	if status == http.StatusNotFound {
-		return s.newResourceResult(resource, "not-found", http.StatusOK, nil)
+		return s.newResourceResult(resource, "not-found", http.StatusOK, nil, "")
 	}
-	return s.newResourceResult(resource, "failed", status, classifyError(err, status, "delete", resource.Type))
+	return s.newResourceResult(resource, "failed", status, classifyError(err, status, "delete", resource.Type), "")
 }
 
 func isOrganizationDisabledError(err error) bool {
@@ -628,13 +645,16 @@ func isOrganizationDisabledError(err error) bool {
 func (s *service) tryCreate(ctx context.Context, resource manifest.Resource, originalID string, idMap map[string]string) (ApplyResult, bool) {
 	status, createdID, err := s.specClient.CreateResource(ctx, resource)
 	if err == nil && status < 300 {
+		serverID := createdID
 		if originalID != "" && idMap != nil {
-			serverID := s.resolveCreatedID(ctx, resource, createdID)
-			if serverID != "" && originalID != serverID {
-				idMap[originalID] = serverID
+			if resolved := s.resolveCreatedID(ctx, resource, createdID); resolved != "" {
+				serverID = resolved
+				if originalID != resolved {
+					idMap[originalID] = resolved
+				}
 			}
 		}
-		return s.newResourceResult(resource, "created", status, nil), true
+		return s.newResourceResult(resource, "created", status, nil, serverID), true
 	}
 	if status == http.StatusConflict {
 		log.Logger.Debug().Str("pkg", "admin").Str("type", resource.Type).Str("name", s.resourceName(resource)).Int("status", status).Msg("create conflict; falling back to update")
@@ -644,22 +664,22 @@ func (s *service) tryCreate(ctx context.Context, resource manifest.Resource, ori
 	}
 	if err != nil {
 		if resource.Type == "organization" && isOrganizationDisabledError(err) {
-			return s.newResourceResult(resource, "skipped", http.StatusOK, nil), true
+			return s.newResourceResult(resource, "skipped", http.StatusOK, nil, ""), true
 		}
-		return s.newResourceResult(resource, "failed", status, classifyError(err, status, "apply", resource.Type)), true
+		return s.newResourceResult(resource, "failed", status, classifyError(err, status, "apply", resource.Type), ""), true
 	}
-	return s.newResourceResult(resource, "failed", status, fmt.Errorf("unknown error")), true
+	return s.newResourceResult(resource, "failed", status, fmt.Errorf("unknown error"), ""), true
 }
 
 func (s *service) applyUpdate(ctx context.Context, resource manifest.Resource) ApplyResult {
 	status, err := s.specClient.UpdateResource(ctx, resource)
 	if err == nil {
-		return s.newResourceResult(resource, "updated", status, nil)
+		return s.newResourceResult(resource, "updated", status, nil, "")
 	}
 	if resource.Type == "organization" && isOrganizationDisabledError(err) {
-		return s.newResourceResult(resource, "skipped", http.StatusOK, nil)
+		return s.newResourceResult(resource, "skipped", http.StatusOK, nil, "")
 	}
-	return s.newResourceResult(resource, "failed", status, classifyError(err, status, "apply", resource.Type))
+	return s.newResourceResult(resource, "failed", status, classifyError(err, status, "apply", resource.Type), "")
 }
 
 func (s *service) resolveCreatedID(ctx context.Context, resource manifest.Resource, createdID string) string {
